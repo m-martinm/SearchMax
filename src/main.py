@@ -1,10 +1,10 @@
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFileDialog,
-    QTreeView, QLineEdit, QPushButton, QCheckBox,
+    QTreeView, QLineEdit, QPushButton, QCheckBox, QToolButton,
     QSplitter, QMenuBar, QMenu, QLabel, QTableView, QMessageBox, QHeaderView, QFileSystemModel
 )
 from PySide6.QtCore import Qt, QDir
-from PySide6.QtGui import QIntValidator, QFont, QStandardItemModel, QStandardItem, QValidator
+from PySide6.QtGui import QIntValidator, QFont, QStandardItemModel, QStandardItem, QValidator, QAction, QCloseEvent
 import subprocess
 import os
 from pathlib import Path
@@ -23,6 +23,40 @@ class SuffixValidator(QValidator):
             return QValidator.Acceptable, input_str, pos
         else:
             return QValidator.Invalid, input_str, pos
+
+
+class CheckableDropdown(QWidget):
+    def __init__(self):
+        super().__init__()
+
+        # Create Layout
+        layout = QVBoxLayout(self)
+
+        # Create dropdown button
+        self.button = QToolButton(self)
+        self.button.setText("Select adapters")
+        self.button.setPopupMode(QToolButton.InstantPopup)
+        layout.addWidget(self.button)
+
+        # Create Menu
+        self.menu = QMenu(self)
+        self.button.setMenu(self.menu)
+
+        # Add checkable options
+        self.options = ["pandoc", "poppler", "postprocpagebreaks",
+                        "ffmpeg", "zip", "decompress", "tar", "sqlite", "mail"]
+        self.actions = []
+
+        for option in self.options:
+            action = QAction(option, self)
+            action.setCheckable(True)
+            action.setChecked(True)
+            self.menu.addAction(action)
+            self.actions.append(action)
+            action.triggered.connect(self.keep_menu_open)
+
+    def keep_menu_open(self):
+        self.button.showMenu()
 
 
 class SeachMax(QMainWindow):
@@ -55,6 +89,7 @@ class SeachMax(QMainWindow):
         self.central_layout = QVBoxLayout(self.central_widget_layout)
 
         # Top Search Bar Layout
+        self.file_types_combobox = CheckableDropdown()
         self.search_layout = QHBoxLayout()
         self.search_query = QLineEdit()
         self.search_query.setPlaceholderText("Enter search query...")
@@ -66,6 +101,7 @@ class SeachMax(QMainWindow):
 
         self.search_button.clicked.connect(self.search)  # TODO: start it seperate thread
         self.search_button.setShortcut("Return")
+        self.search_layout.addWidget(self.file_types_combobox)
         self.search_layout.addWidget(self.search_query)
         self.search_layout.addWidget(self.search_button)
 
@@ -78,6 +114,7 @@ class SeachMax(QMainWindow):
         self.case_sensitive = QCheckBox("Case sensitive")
         self.invert_match = QCheckBox("Invert match")
         self.multiline = QCheckBox("Multiline")
+        self.ignore_vcs = QCheckBox("Ignore .gitignore")
         self.max_count_label = QLabel("Max count")
         self.max_count = QLineEdit("0")
         self.max_count.setValidator(QIntValidator(bottom=0))
@@ -91,6 +128,7 @@ class SeachMax(QMainWindow):
         self.options_layout.addWidget(self.case_sensitive)
         self.options_layout.addWidget(self.invert_match)
         self.options_layout.addWidget(self.multiline)
+        self.options_layout.addWidget(self.ignore_vcs)
         self.options_layout.addWidget(self.max_count_label)
         self.options_layout.addWidget(self.max_count)
         self.options_layout.addWidget(self.max_file_size_label)
@@ -149,9 +187,15 @@ class SeachMax(QMainWindow):
         query = self.search_query.text().strip()
         if not query:
             return
-        excludes = [f"-g !{e.strip()}" for e in self.exclude_input.text().split(";") if e.strip()]
-        args = excludes
-
+        args = [f"-g !{e.strip()}" for e in self.exclude_input.text().split(";") if e.strip()]
+        allowed_adapters = [opt.text()
+                            for opt in self.file_types_combobox.actions if opt.isChecked()]
+        if allowed_adapters:
+            args.append("--rga-adapters=+" + ",".join(allowed_adapters))
+        disallowed_adapters = [opt.text()
+                               for opt in self.file_types_combobox.actions if not opt.isChecked()]
+        if disallowed_adapters:
+            args.append("--rga-adapters=-" + ",".join(disallowed_adapters))
         if self.case_sensitive.isChecked():
             args.append("-s")
         else:
@@ -162,6 +206,9 @@ class SeachMax(QMainWindow):
 
         if self.multiline.isChecked():
             args.append("-U")
+
+        if self.ignore_vcs.isChecked():
+            args.append("--no-ignore-vcs")
 
         max_count = self.max_count.text().strip()
         if max_count and max_count != "0":
