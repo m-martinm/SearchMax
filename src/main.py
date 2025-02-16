@@ -1,10 +1,18 @@
 from PySide6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFileDialog,
-    QTreeView, QLineEdit, QPushButton, QCheckBox, QToolButton,
-    QSplitter, QMenuBar, QMenu, QLabel, QTableView, QMessageBox, QHeaderView, QFileSystemModel
+    QApplication, QMainWindow, QWidget,
+    QVBoxLayout, QHBoxLayout, QFileDialog,
+    QTreeView, QLineEdit, QPushButton,
+    QCheckBox, QToolButton, QStyledItemDelegate,
+    QSplitter, QMenuBar, QMenu,
+    QLabel, QTableView, QMessageBox,
+    QHeaderView, QFileSystemModel
 )
 from PySide6.QtCore import Qt, QDir
-from PySide6.QtGui import QIntValidator, QFont, QStandardItemModel, QStandardItem, QValidator, QAction, QCloseEvent
+from PySide6.QtGui import (
+    QIntValidator, QFont, QStandardItemModel,
+    QStandardItem, QValidator, QAction,
+    QTextDocument, QIcon, QPixmap
+)
 import subprocess
 import os
 from pathlib import Path
@@ -23,6 +31,20 @@ class SuffixValidator(QValidator):
             return QValidator.Acceptable, input_str, pos
         else:
             return QValidator.Invalid, input_str, pos
+
+
+class RichTextDelegate(QStyledItemDelegate):
+    def paint(self, painter, option, index):
+        text = index.data(Qt.DisplayRole)
+        if text:
+            doc = QTextDocument()
+            doc.setHtml(text)
+            painter.save()
+            painter.translate(option.rect.topLeft())
+            doc.drawContents(painter)
+            painter.restore()
+        else:
+            super().paint(painter, option, index)
 
 
 class CheckableDropdown(QWidget):
@@ -64,6 +86,10 @@ class SeachMax(QMainWindow):
         super().__init__()
         self.setWindowTitle("SearchMax")
         self.setGeometry(100, 100, 1280, 720)
+
+        pixmap = QPixmap("icon.png")
+        self.setWindowIcon(QIcon(pixmap))
+
         self.font: QFont = self.font()
         self.font.setPointSize(10)
         self.setFont(self.font)
@@ -136,9 +162,12 @@ class SeachMax(QMainWindow):
 
         self.search_results = QTableView()
         self.search_results_model = QStandardItemModel()
+
         self.search_results_model.setColumnCount(3)
         self.search_results_model.setHorizontalHeaderLabels(["Path", "Line", "Text"])
+
         self.search_results.setModel(self.search_results_model)
+        self.search_results.setItemDelegate(RichTextDelegate())
         self.search_results.setEditTriggers(QTableView.NoEditTriggers)
         self.search_results.verticalHeader().setVisible(False)
         self.search_results.doubleClicked.connect(self.open_file_at_line)
@@ -256,6 +285,18 @@ class SeachMax(QMainWindow):
         full_path = Path.cwd() / path
         line_number = data["line_number"]
         txt = data["lines"]["text"]
+        submatches = data.get("submatches", [])
+        submatches.sort(key=lambda x: x["start"])
+        offset = 0
+        for s in submatches:
+            start = s["start"] + offset
+            end = s["end"] + offset
+            matched_text = s["match"]["text"]
+            new_text = f'<span style="background-color: #828282; font-weight:bold;">{matched_text}</span>'
+            txt = txt[:start] + new_text + txt[end:]
+
+            offset += len(new_text) - (end - start)
+
         res = re.search(r"Page (\d+):", txt)
         pdf_present = False
         if res is not None:
@@ -263,7 +304,6 @@ class SeachMax(QMainWindow):
             txt = re.sub(r"Page (\d+):", "", txt)
             pdf_present = True
 
-        # Add the data to the model
         path_item = QStandardItem(str(path))
         path_item.setToolTip(str(full_path))
         path_item.setFlags(path_item.flags() & ~Qt.ItemIsEditable)
@@ -271,7 +311,8 @@ class SeachMax(QMainWindow):
         line_item.setFlags(line_item.flags() & ~Qt.ItemIsEditable)
         if pdf_present:
             line_item.setToolTip("It's actually page number here :)")
-        txt_item = QStandardItem(txt)
+        txt_item = QStandardItem()
+        txt_item.setData(txt, Qt.DisplayRole)
         txt_item.setFlags(txt_item.flags() & ~Qt.ItemIsEditable)
         self.search_results_model.appendRow([path_item, line_item, txt_item])
 
@@ -291,6 +332,7 @@ if __name__ == "__main__":
     app = QApplication([])
     window = SeachMax()
     window.show()
-    app.exec()
     window.setFocus()
     window.search_query.setFocus()
+    app.exec()
+    
