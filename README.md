@@ -13,10 +13,11 @@ Simple GUI wrapper around [ripgrep-all](https://github.com/phiresky/ripgrep-all)
 
 You need to have a C compiler to compile the python program to an executable.
 
+
 1. python -m venv env (optional)
 2. Activate the enviroment (optional)
 3. `pip install -r requirements.txt`
-4. `pip install nuitka`
+4. `pip install nuitka` [nuitka](https://nuitka.net/)
 5. `python -m nuitka --onefile --standalone --enable-plugin=pyside6 --output-dir=build --output-filename=SearchMax .\src\main.py`
 
 ## Known issues
