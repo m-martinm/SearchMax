@@ -1,13 +1,13 @@
+from typing import override
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget,
-    QVBoxLayout, QHBoxLayout, QFileDialog,
-    QTreeView, QLineEdit, QPushButton,
-    QCheckBox, QToolButton, QStyledItemDelegate,
-    QSplitter, QMenuBar, QMenu,
-    QLabel, QTableView, QMessageBox,
-    QHeaderView, QFileSystemModel
+    QVBoxLayout, QHBoxLayout, QTreeView,
+    QLineEdit, QPushButton, QCheckBox,
+    QToolButton, QStyledItemDelegate, QSplitter,
+    QMenu, QLabel, QTableView,
+    QMessageBox, QHeaderView, QFileSystemModel
 )
-from PySide6.QtCore import Qt, QDir
+from PySide6.QtCore import Qt, QDir, QProcess
 from PySide6.QtGui import (
     QIntValidator, QFont, QStandardItemModel,
     QStandardItem, QValidator, QAction,
@@ -18,6 +18,7 @@ import os
 from pathlib import Path
 import json
 import re
+import sys
 import platform
 
 
@@ -51,20 +52,16 @@ class CheckableDropdown(QWidget):
     def __init__(self):
         super().__init__()
 
-        # Create Layout
         layout = QVBoxLayout(self)
 
-        # Create dropdown button
         self.button = QToolButton(self)
         self.button.setText("Select adapters")
         self.button.setPopupMode(QToolButton.InstantPopup)
         layout.addWidget(self.button)
 
-        # Create Menu
         self.menu = QMenu(self)
         self.button.setMenu(self.menu)
 
-        # Add checkable options
         self.options = ["pandoc", "poppler", "postprocpagebreaks",
                         "ffmpeg", "zip", "decompress", "tar", "sqlite", "mail"]
         self.actions = []
@@ -97,18 +94,26 @@ class SeachMax(QMainWindow):
         self.setCentralWidget(self.central_widget)
         self.main_splitter = QSplitter(Qt.Horizontal)
 
+        self.current_dir: Path = Path.cwd()
+
         # Left Panel - Folder View
         self.folder_view = QTreeView()
         self.folder_model = QFileSystemModel()
-        self.folder_model.setRootPath(str(Path.cwd()))
         self.folder_view.setModel(self.folder_model)
+        self.folder_model.setRootPath("")
+        self.folder_model.setResolveSymlinks(True)
+        self.folder_model.setFilter(
+            QDir.Filter.AllDirs | QDir.Filter.NoDotAndDotDot | QDir.Filter.NoSymLinks)
+        self.folder_view.setRootIndex(self.folder_model.index(""))
+        self.folder_view.setExpanded(self.folder_model.index(str(self.current_dir)), True)
         # TODO: Add option to show/hide hidden folders
-        self.folder_model.setFilter(QDir.Filter.AllDirs | QDir.Filter.NoDotAndDotDot)
         self.folder_view.setColumnHidden(1, True)
         self.folder_view.setColumnHidden(2, True)
         self.folder_view.setColumnHidden(3, True)
-        self.main_splitter.addWidget(self.folder_view)
+        self.folder_view.setHeaderHidden(True)
+        self.folder_view.setToolTip("Double click on a folder to start a search in it.")
         self.folder_view.doubleClicked.connect(self.folder_double_clicked)
+        self.main_splitter.addWidget(self.folder_view)
 
         # Right Panel - Central Layout
         self.central_widget_layout = QWidget()
@@ -125,7 +130,7 @@ class SeachMax(QMainWindow):
         self.search_query.setFont(tmp)
         self.search_button = QPushButton("Search")
 
-        self.search_button.clicked.connect(self.search)  # TODO: start it seperate thread
+        self.search_button.clicked.connect(self.start_search)
         self.search_button.setShortcut("Return")
         self.search_layout.addWidget(self.file_types_combobox)
         self.search_layout.addWidget(self.search_query)
@@ -145,7 +150,7 @@ class SeachMax(QMainWindow):
         self.max_count = QLineEdit("0")
         self.max_count.setValidator(QIntValidator(bottom=0))
         self.max_count.setMaximumWidth(50)
-        self.max_file_size = QLineEdit()
+        self.max_file_size = QLineEdit("50M")
         self.max_file_size_label = QLabel("Max file size")
         self.max_file_size.setValidator(SuffixValidator())
         self.max_file_size.setPlaceholderText("10k, 10M, 1G...")
@@ -160,6 +165,7 @@ class SeachMax(QMainWindow):
         self.options_layout.addWidget(self.max_file_size_label)
         self.options_layout.addWidget(self.max_file_size)
 
+        # Search results display
         self.search_results = QTableView()
         self.search_results_model = QStandardItemModel()
 
@@ -171,9 +177,13 @@ class SeachMax(QMainWindow):
         self.search_results.setEditTriggers(QTableView.NoEditTriggers)
         self.search_results.verticalHeader().setVisible(False)
         self.search_results.doubleClicked.connect(self.open_file_at_line)
+        self.search_results.resizeColumnToContents(0)
+        self.search_results.resizeColumnToContents(1)
+        # TODO: not the most optimal solution
         self.search_results.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
         self.search_results.setAlternatingRowColors(True)
 
+        # Setup central layout
         self.central_layout.addLayout(self.search_layout)
         self.central_layout.addLayout(self.options_layout)
         self.central_layout.addWidget(self.search_results)
@@ -186,36 +196,35 @@ class SeachMax(QMainWindow):
         main_layout = QVBoxLayout(self.central_widget)
         main_layout.addWidget(self.main_splitter)
 
-        self.menu_bar = QMenuBar(self)
-        self.menu_options = QMenu("Options", self)
-        self.open_folder = self.menu_options.addAction("Open folder")
-        self.open_folder.triggered.connect(self.select_folder)
-        self.menu_bar.addMenu(self.menu_options)
-        self.setMenuBar(self.menu_bar)
         self.status_bar = self.statusBar()
-        self.setup_treeview()
+        self.process: None | QProcess = None
 
-    def select_folder(self):
-        folder = QFileDialog.getExistingDirectory(self, "Select Folder")
-        if folder:
-            os.chdir(folder)
-            self.setup_treeview()
+    def closeEvent(self, event):
+        if self.process is not None:
+            reply = QMessageBox.question(
+                self, "Confirm Close", "Are you sure you want to close the window?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if reply == QMessageBox.Yes:
+                self.process.readyReadStandardOutput.disconnect()
+                self.process.readyReadStandardError.disconnect()
+                self.process.finished.disconnect()
+                self.process.kill()
+                self.process = None
+                event.accept()
+            else:
+                event.ignore()
+        else:
+            super().closeEvent(event)
 
-    def folder_double_clicked(self, index):
-        cwd = Path.cwd()
-        os.chdir(self.folder_model.filePath(index))
-        self.search()
-        os.chdir(cwd)
-
-    def setup_treeview(self):
-        self.folder_model.setRootPath(str(Path.cwd()))
-        self.folder_view.setRootIndex(self.folder_model.index(str(Path.cwd())))
-        self.folder_model.setResolveSymlinks(True)
-
-    def search(self):
+    def start_search(self):
         query = self.search_query.text().strip()
-        if not query:
+        if not query or self.process is not None:
             return
+
+        self.process = QProcess()
+        self.process.readyReadStandardOutput.connect(self.hande_search_stdout)
+        self.process.readyReadStandardError.connect(self.handle_search_stderr)
+        self.process.finished.connect(self.handle_search_finished)
         args = [f"-g !{e.strip()}" for e in self.exclude_input.text().split(";") if e.strip()]
         allowed_adapters = [opt.text()
                             for opt in self.file_types_combobox.actions if opt.isChecked()]
@@ -229,65 +238,96 @@ class SeachMax(QMainWindow):
             args.append("-s")
         else:
             args.append("-i")
-
         if self.invert_match.isChecked():
             args.append("-v")
-
         if self.multiline.isChecked():
             args.append("-U")
-
         if self.ignore_vcs.isChecked():
             args.append("--no-ignore-vcs")
-
         max_count = self.max_count.text().strip()
         if max_count and max_count != "0":
             args.append(f"--max-count={max_count}")
-
         max_file_sz = self.max_file_size.text().strip()
         if max_file_sz and max_file_sz != 0:
             args.append(f"--max-filesize={max_file_sz}")
-        output = subprocess.run(
-            ["rga", "-n", "--json", *args, query],
-            text=True,
-            encoding="utf-8",
-            capture_output=True
+
+        self.process.setWorkingDirectory(str(self.current_dir))
+        self.process.start(
+            "rga", ["-n", "--json", *args, "-e", query, "."],
         )
         self.status_bar.clearMessage()
-        match output.returncode:
-            case 1:
-                self.status_bar.showMessage("No matches found.", 5000)
-                return
-            case 2:
-                self.status_bar.showMessage(output.stderr, 5000)
-                return
         self.search_results_model.clear()
+        self.search_results_model.setHorizontalHeaderLabels(["Path", "Line", "Text"])
 
-        for line in output.stdout.splitlines():
+    def hande_search_stdout(self):
+        if self.process is None:
+            return
+        stdout = self.process.readAllStandardOutput()
+        stdout = bytes(stdout).decode("utf-8")
+        for line in stdout.splitlines():
             try:
                 obj = json.loads(line)
-                if obj.get("type") == "match":
-                    self.add_search_result(obj["data"])
-                    # TODO: Handle submatches properly if needed
-                elif obj.get("type") == "summary":
-                    stats = obj["data"]["stats"]
-                    self.status_bar.showMessage(
-                        f"{stats['matches']} found in {stats['elapsed']['human']}")
+                data = obj.get("data", dict())
+                obj_type = obj.get("type", "")
+                if obj_type == "match":
+                    self.add_search_result(data)
+                elif obj_type == "summary":
+                    stats = data.get("stats", None)
+                    if stats is not None:
+                        self.status_bar.showMessage(
+                            f"{stats['matches']} matches found in {stats['elapsed']['human']}")
             except json.JSONDecodeError:
                 continue
 
-        self.search_results_model.setHorizontalHeaderLabels(["Path", "Line", "Text"])
-        self.search_results.setColumnWidth(0, self.search_results.width() // 8 * 2 - 5)
-        self.search_results.resizeColumnToContents(1)
-        self.search_results.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+    def handle_search_stderr(self):  # TODO: handle error a bit better, Access denied or permission denied
+        if self.process is None:
+            return
+        if not self.process.isOpen():
+            return
+        stderr = self.process.readAllStandardError()
+        stderr = bytes(stderr).decode("utf-8")
+        if len(stderr) > 1024:
+            stderr = stderr[:1024] + "..."
+        QMessageBox.critical(self, "Error", stderr)
+        self.process.readyReadStandardOutput.disconnect()
+        self.process.readyReadStandardError.disconnect()
+        self.process.finished.disconnect()
+        self.process.kill()
+        self.process = None
 
-    def add_search_result(self, data):
-        path = Path(data["path"]["text"])
+    def handle_search_finished(self):
+        if self.process is None:
+            return
+        self.search_results.resizeColumnToContents(0)
+        self.search_results.resizeColumnToContents(1)
+        self.search_results.horizontalHeader().setSectionResizeMode(
+            2, QHeaderView.Stretch)  # TODO: not the most optimal solution
+        match self.process.exitCode():
+            case 1:
+                self.status_bar.showMessage("No matches found.", 5000)
+            case 2:
+                self.status_bar.showMessage("An unknown error occured.", 5000)
+        self.process = None
+
+    def folder_double_clicked(self, index):
+        self.current_dir = Path(self.folder_model.filePath(index))
+        self.folder_view.setExpanded(index, True)
+        self.start_search()
+
+    def add_search_result(self, data: dict):
+        if (path := data.get("path", {}).get("text", None)) is None:
+            return
+        path = Path(path)
         full_path = Path.cwd() / path
-        line_number = data["line_number"]
-        txt = data["lines"]["text"]
+        if (line_number := data.get("line_number", None)) is None:
+            return
+        if (txt := data.get("lines", {}).get("text", None)) is None:
+            return
+
         submatches = data.get("submatches", [])
         submatches.sort(key=lambda x: x["start"])
         offset = 0
+        # TODO: Maybe also check these keys, but doesnt't seem to be an issue right now
         for s in submatches:
             start = s["start"] + offset
             end = s["end"] + offset
@@ -298,32 +338,31 @@ class SeachMax(QMainWindow):
             offset += len(new_text) - (end - start)
 
         res = re.search(r"Page (\d+):", txt)
-        pdf_present = False
         if res is not None:
-            line_number = res.group(1)
+            line_number = "Page " + res.group(1)
             txt = re.sub(r"Page (\d+):", "", txt)
-            pdf_present = True
 
         path_item = QStandardItem(str(path))
         path_item.setToolTip(str(full_path))
         path_item.setFlags(path_item.flags() & ~Qt.ItemIsEditable)
         line_item = QStandardItem(str(line_number))
         line_item.setFlags(line_item.flags() & ~Qt.ItemIsEditable)
-        if pdf_present:
-            line_item.setToolTip("It's actually page number here :)")
         txt_item = QStandardItem()
-        txt_item.setData(txt, Qt.DisplayRole)
+        txt_item.setData(txt.strip(), Qt.DisplayRole)  # TODO: Add setting to strip lines
         txt_item.setFlags(txt_item.flags() & ~Qt.ItemIsEditable)
         self.search_results_model.appendRow([path_item, line_item, txt_item])
 
     def open_file_at_line(self, index):
         path_item = self.search_results_model.item(index.row(), 0)
-        file_path = Path.cwd() / Path(path_item.text())
+        file_path = self.current_dir / Path(path_item.text())
+        pname = platform.system().lower()
         try:
-            if "windows" in platform.system().lower():
+            if "windows" in pname:
                 os.startfile(file_path)
-            else:
+            elif "linux" in pname:
                 subprocess.run(["xdg-open", file_path], check=True)
+            else:
+                subprocess.run(["open", file_path], check=True)
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to open file: {e}")
 
@@ -334,5 +373,4 @@ if __name__ == "__main__":
     window.show()
     window.setFocus()
     window.search_query.setFocus()
-    app.exec()
-    
+    sys.exit(app.exec())
