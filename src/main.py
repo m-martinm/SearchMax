@@ -1,4 +1,14 @@
-from typing import override
+# nuitka-project: --onefile
+# nuitka-project: --enable-plugin=pyside6
+# nuitka-project: --output-dir=build
+# nuitka-project: --output-filename=SearchMax
+# nuitka-project-if: {OS} == "Windows":
+#   nuitka-project: --windows-icon-from-ico=icon.png
+#   nuitka-project: --windows-console-mode=disable
+# nuitka-project-if: {OS} == "Linux":
+#   nuitka-project:  --linux-icon=icon.png
+# nuitka-project-if: {OS} == "Darwin":
+#   nuitka-project:  --macos-app-icon=icon.png
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget,
     QVBoxLayout, QHBoxLayout, QTreeView,
@@ -20,6 +30,11 @@ import json
 import re
 import sys
 import platform
+
+if platform.system() == "Windows":
+    PATH_DIVIDER = "\\"
+else:
+    PATH_DIVIDER = "/"
 
 
 class SuffixValidator(QValidator):
@@ -95,8 +110,12 @@ class SeachMax(QMainWindow):
         self.main_splitter = QSplitter(Qt.Horizontal)
 
         self.current_dir: Path = Path.cwd()
-
+        self.current_dir_label = QLabel()
+        self.set_current_path_label()
         # Left Panel - Folder View
+        self.left_widget_layout = QWidget()
+        self.left_layout = QVBoxLayout(self.left_widget_layout)
+
         self.folder_view = QTreeView()
         self.folder_model = QFileSystemModel()
         self.folder_view.setModel(self.folder_model)
@@ -113,7 +132,9 @@ class SeachMax(QMainWindow):
         self.folder_view.setHeaderHidden(True)
         self.folder_view.setToolTip("Double click on a folder to start a search in it.")
         self.folder_view.doubleClicked.connect(self.folder_double_clicked)
-        self.main_splitter.addWidget(self.folder_view)
+
+        self.left_layout.addWidget(self.current_dir_label)
+        self.left_layout.addWidget(self.folder_view)
 
         # Right Panel - Central Layout
         self.central_widget_layout = QWidget()
@@ -188,10 +209,11 @@ class SeachMax(QMainWindow):
         self.central_layout.addLayout(self.options_layout)
         self.central_layout.addWidget(self.search_results)
 
+        self.main_splitter.addWidget(self.left_widget_layout)
         self.main_splitter.addWidget(self.central_widget_layout)
 
-        self.main_splitter.setStretchFactor(0, 1)
-        self.main_splitter.setStretchFactor(1, 2)
+        self.main_splitter.setStretchFactor(0, 2)
+        self.main_splitter.setStretchFactor(1, 3)
 
         main_layout = QVBoxLayout(self.central_widget)
         main_layout.addWidget(self.main_splitter)
@@ -254,6 +276,7 @@ class SeachMax(QMainWindow):
         self.process.setWorkingDirectory(str(self.current_dir))
         self.process.start(
             "rga", ["-n", "--json", *args, "-e", query, "."],
+            QProcess.OpenModeFlag.ReadOnly | QProcess.OpenModeFlag.Unbuffered
         )
         self.status_bar.clearMessage()
         self.search_results_model.clear()
@@ -309,21 +332,29 @@ class SeachMax(QMainWindow):
                 self.status_bar.showMessage("An unknown error occured.", 5000)
         self.process = None
 
+    def set_current_path_label(self):
+        path = str(self.current_dir)
+        max_len = 50
+        if len(path) > max_len:
+            self.current_dir_label.setText("..." + path[-max_len:])
+        else:
+            self.current_dir_label.setText(str(self.current_dir))
+
     def folder_double_clicked(self, index):
         self.current_dir = Path(self.folder_model.filePath(index))
+        self.set_current_path_label()
         self.folder_view.setExpanded(index, True)
         self.start_search()
 
     def add_search_result(self, data: dict):
         if (path := data.get("path", {}).get("text", None)) is None:
             return
-        path = Path(path)
-        full_path = Path.cwd() / path
+        full_path = self.current_dir / path
         if (line_number := data.get("line_number", None)) is None:
             return
         if (txt := data.get("lines", {}).get("text", None)) is None:
             return
-
+        richtxt = txt
         submatches = data.get("submatches", [])
         submatches.sort(key=lambda x: x["start"])
         offset = 0
@@ -333,22 +364,26 @@ class SeachMax(QMainWindow):
             end = s["end"] + offset
             matched_text = s["match"]["text"]
             new_text = f'<span style="background-color: #828282; font-weight:bold;">{matched_text}</span>'
-            txt = txt[:start] + new_text + txt[end:]
+            richtxt = richtxt[:start] + new_text + richtxt[end:]
 
             offset += len(new_text) - (end - start)
 
-        res = re.search(r"Page (\d+):", txt)
+        res = re.search(r"Page (\d+):", richtxt)
         if res is not None:
             line_number = "Page " + res.group(1)
+            richtxt = re.sub(r"Page (\d+):", "", richtxt)
             txt = re.sub(r"Page (\d+):", "", txt)
 
-        path_item = QStandardItem(str(path))
+        # TODO: Some problems: 1. two files can have the same "path" 2. sometimes unnecesarry to display the parent
+        path_item = QStandardItem(full_path.parent.name + PATH_DIVIDER + full_path.name)
         path_item.setToolTip(str(full_path))
         path_item.setFlags(path_item.flags() & ~Qt.ItemIsEditable)
         line_item = QStandardItem(str(line_number))
         line_item.setFlags(line_item.flags() & ~Qt.ItemIsEditable)
         txt_item = QStandardItem()
-        txt_item.setData(txt.strip(), Qt.DisplayRole)  # TODO: Add setting to strip lines
+        txt_item.setData(richtxt.strip(), Qt.DisplayRole)  # TODO: Add setting to strip lines
+        # TODO: Ok temporary solution but would be better to have a smooth scroll
+        txt_item.setToolTip(txt)
         txt_item.setFlags(txt_item.flags() & ~Qt.ItemIsEditable)
         self.search_results_model.appendRow([path_item, line_item, txt_item])
 
